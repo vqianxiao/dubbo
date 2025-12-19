@@ -491,9 +491,9 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
                     "",
                     "Error occurred when refreshing router chain. " + "The addresses from notification: "
                             + newlyInvokers.stream()
-                            .map(Invoker::getUrl)
-                            .map(URL::getAddress)
-                            .collect(Collectors.joining(", ")),
+                                    .map(Invoker::getUrl)
+                                    .map(URL::getAddress)
+                                    .collect(Collectors.joining(", ")),
                     t);
 
             throw t;
@@ -609,24 +609,24 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
         return "Directory(" + "invokers: "
                 + invokers.size() + "["
                 + invokers.stream()
-                .map(Invoker::getUrl)
-                .map(URL::getAddress)
-                .limit(3)
-                .collect(Collectors.joining(", "))
+                        .map(Invoker::getUrl)
+                        .map(URL::getAddress)
+                        .limit(3)
+                        .collect(Collectors.joining(", "))
                 + "]" + ", validInvokers: "
                 + validInvokers.size() + "["
                 + validInvokers.stream()
-                .map(Invoker::getUrl)
-                .map(URL::getAddress)
-                .limit(3)
-                .collect(Collectors.joining(", "))
+                        .map(Invoker::getUrl)
+                        .map(URL::getAddress)
+                        .limit(3)
+                        .collect(Collectors.joining(", "))
                 + "]" + ", invokersToReconnect: "
                 + invokersToReconnect.size() + "["
                 + invokersToReconnect.stream()
-                .map(Invoker::getUrl)
-                .map(URL::getAddress)
-                .limit(3)
-                .collect(Collectors.joining(", "))
+                        .map(Invoker::getUrl)
+                        .map(URL::getAddress)
+                        .limit(3)
+                        .collect(Collectors.joining(", "))
                 + "]" + ')';
     }
 }
