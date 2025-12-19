@@ -58,7 +58,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 
 import static org.apache.dubbo.common.constants.CommonConstants.CONSUMER;
@@ -125,7 +125,10 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
 
     private volatile ScheduledFuture<?> connectivityCheckFuture;
 
-    private final ReentrantLock invokerRefreshLock = new ReentrantLock();
+    private final ReentrantReadWriteLock invokerRefreshLock = new ReentrantReadWriteLock();
+
+    private final ReentrantReadWriteLock.ReadLock invokerRefreshReadLock = invokerRefreshLock.readLock();
+    private final ReentrantReadWriteLock.WriteLock invokerRefreshWriteLock = invokerRefreshLock.writeLock();
 
     /**
      * The max count of invokers for each reconnect task select to try to reconnect.
@@ -208,9 +211,12 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
         BitList<Invoker<T>> availableInvokers;
         SingleRouterChain<T> singleChain = null;
         try {
+            if (routerChain != null) {
+                routerChain.getLock().readLock().lock();
+            }
             try {
-                if (routerChain != null) {
-                    routerChain.getLock().readLock().lock();
+                if (!invokerRefreshReadLock.tryLock(LockUtils.DEFAULT_TIMEOUT, TimeUnit.MILLISECONDS)) {
+                    throw new RpcException("Failed to acquire invokerRefreshLock for reading invokers");
                 }
                 // use clone to avoid being modified at doList().
                 if (invokersInitialized) {
@@ -218,17 +224,17 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
                 } else {
                     availableInvokers = invokers.clone();
                 }
-
-                if (routerChain != null) {
-                    singleChain = routerChain.getSingleChain(getConsumerUrl(), availableInvokers, invocation);
-                    singleChain.getLock().readLock().lock();
-                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RpcException("Failed to refresh invokers, cause: " + e.getMessage(), e);
             } finally {
-                if (routerChain != null) {
-                    routerChain.getLock().readLock().unlock();
-                }
+                invokerRefreshReadLock.unlock();
             }
 
+            if (routerChain != null) {
+                singleChain = routerChain.getSingleChain(getConsumerUrl(), availableInvokers, invocation);
+                singleChain.getLock().readLock().lock();
+            }
             List<Invoker<T>> routedResult = doList(singleChain, availableInvokers, invocation);
             if (routedResult.isEmpty()) {
                 // 2-2 - No provider available.
@@ -248,6 +254,9 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
         } finally {
             if (singleChain != null) {
                 singleChain.getLock().readLock().unlock();
+            }
+            if (routerChain != null) {
+                routerChain.getLock().readLock().unlock();
             }
         }
     }
@@ -298,7 +307,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
 
     @Override
     public void addInvalidateInvoker(Invoker<T> invoker) {
-        LockUtils.safeLock(invokerRefreshLock, LockUtils.DEFAULT_TIMEOUT, () -> {
+        LockUtils.safeLock(invokerRefreshWriteLock, LockUtils.DEFAULT_TIMEOUT, () -> {
             // 1. remove this invoker from validInvokers list, this invoker will not be listed in the next time
             if (removeValidInvoker(invoker)) {
                 // 2. add this invoker to reconnect list
@@ -329,7 +338,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
                             // 1. pick invokers from invokersToReconnect
                             // limit max reconnectTaskTryCount, prevent this task hang up all the connectivityExecutor
                             // for long time
-                            LockUtils.safeLock(invokerRefreshLock, LockUtils.DEFAULT_TIMEOUT, () -> {
+                            LockUtils.safeLock(invokerRefreshWriteLock, LockUtils.DEFAULT_TIMEOUT, () -> {
                                 if (invokersToReconnect.size() < reconnectTaskTryCount) {
                                     invokersToTry.addAll(invokersToReconnect);
                                 } else {
@@ -348,7 +357,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
                             // 2. try to check the invoker's status
                             for (Invoker<T> invoker : invokersToTry) {
                                 AtomicBoolean invokerExist = new AtomicBoolean(false);
-                                LockUtils.safeLock(invokerRefreshLock, LockUtils.DEFAULT_TIMEOUT, () -> {
+                                LockUtils.safeLock(invokerRefreshWriteLock, LockUtils.DEFAULT_TIMEOUT, () -> {
                                     invokerExist.set(invokers.contains(invoker));
                                 });
                                 // Should not lock here, `invoker.isAvailable` may need some time to check
@@ -362,7 +371,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
                             }
 
                             // 3. recover valid invoker
-                            LockUtils.safeLock(invokerRefreshLock, LockUtils.DEFAULT_TIMEOUT, () -> {
+                            LockUtils.safeLock(invokerRefreshWriteLock, LockUtils.DEFAULT_TIMEOUT, () -> {
                                 for (Invoker<T> tInvoker : needDeleteList) {
                                     if (invokers.contains(tInvoker)) {
                                         addValidInvoker(tInvoker);
@@ -388,7 +397,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
                         }
 
                         // 4. submit new task if it has more to recover
-                        LockUtils.safeLock(invokerRefreshLock, LockUtils.DEFAULT_TIMEOUT, () -> {
+                        LockUtils.safeLock(invokerRefreshWriteLock, LockUtils.DEFAULT_TIMEOUT, () -> {
                             if (!invokersToReconnect.isEmpty()) {
                                 checkConnectivity();
                             }
@@ -411,7 +420,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
      * 4. all the invokers disappeared from total invokers should be removed in the disabled invokers list
      */
     public void refreshInvoker() {
-        LockUtils.safeLock(invokerRefreshLock, LockUtils.DEFAULT_TIMEOUT, () -> {
+        LockUtils.safeLock(invokerRefreshWriteLock, LockUtils.DEFAULT_TIMEOUT, () -> {
             if (invokersInitialized) {
                 refreshInvokerInternal();
             }
@@ -445,7 +454,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
 
     @Override
     public void addDisabledInvoker(Invoker<T> invoker) {
-        LockUtils.safeLock(invokerRefreshLock, LockUtils.DEFAULT_TIMEOUT, () -> {
+        LockUtils.safeLock(invokerRefreshWriteLock, LockUtils.DEFAULT_TIMEOUT, () -> {
             if (invokers.contains(invoker)) {
                 disabledInvokers.add(invoker);
                 removeValidInvoker(invoker);
@@ -458,7 +467,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
 
     @Override
     public void recoverDisabledInvoker(Invoker<T> invoker) {
-        LockUtils.safeLock(invokerRefreshLock, LockUtils.DEFAULT_TIMEOUT, () -> {
+        LockUtils.safeLock(invokerRefreshWriteLock, LockUtils.DEFAULT_TIMEOUT, () -> {
             if (disabledInvokers.remove(invoker)) {
                 try {
                     addValidInvoker(invoker);
@@ -482,9 +491,9 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
                     "",
                     "Error occurred when refreshing router chain. " + "The addresses from notification: "
                             + newlyInvokers.stream()
-                                    .map(Invoker::getUrl)
-                                    .map(URL::getAddress)
-                                    .collect(Collectors.joining(", ")),
+                            .map(Invoker::getUrl)
+                            .map(URL::getAddress)
+                            .collect(Collectors.joining(", ")),
                     t);
 
             throw t;
@@ -526,7 +535,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
     }
 
     protected void setInvokers(BitList<Invoker<T>> invokers) {
-        LockUtils.safeLock(invokerRefreshLock, LockUtils.DEFAULT_TIMEOUT, () -> {
+        LockUtils.safeLock(invokerRefreshWriteLock, LockUtils.DEFAULT_TIMEOUT, () -> {
             this.invokers = invokers;
             refreshInvokerInternal();
             this.invokersInitialized = true;
@@ -538,7 +547,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
 
     protected void destroyInvokers() {
         // set empty instead of clearing to support concurrent access.
-        LockUtils.safeLock(invokerRefreshLock, LockUtils.DEFAULT_TIMEOUT, () -> {
+        LockUtils.safeLock(invokerRefreshWriteLock, LockUtils.DEFAULT_TIMEOUT, () -> {
             this.invokers = BitList.emptyList();
             this.validInvokers = BitList.emptyList();
             this.invokersInitialized = false;
@@ -547,7 +556,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
 
     private boolean addValidInvoker(Invoker<T> invoker) {
         AtomicBoolean result = new AtomicBoolean(false);
-        LockUtils.safeLock(invokerRefreshLock, LockUtils.DEFAULT_TIMEOUT, () -> {
+        LockUtils.safeLock(invokerRefreshWriteLock, LockUtils.DEFAULT_TIMEOUT, () -> {
             result.set(this.validInvokers.add(invoker));
         });
         MetricsEventBus.publish(
@@ -557,7 +566,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
 
     private boolean removeValidInvoker(Invoker<T> invoker) {
         AtomicBoolean result = new AtomicBoolean(false);
-        LockUtils.safeLock(invokerRefreshLock, LockUtils.DEFAULT_TIMEOUT, () -> {
+        LockUtils.safeLock(invokerRefreshWriteLock, LockUtils.DEFAULT_TIMEOUT, () -> {
             result.set(this.validInvokers.remove(invoker));
         });
         MetricsEventBus.publish(
@@ -600,24 +609,24 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
         return "Directory(" + "invokers: "
                 + invokers.size() + "["
                 + invokers.stream()
-                        .map(Invoker::getUrl)
-                        .map(URL::getAddress)
-                        .limit(3)
-                        .collect(Collectors.joining(", "))
+                .map(Invoker::getUrl)
+                .map(URL::getAddress)
+                .limit(3)
+                .collect(Collectors.joining(", "))
                 + "]" + ", validInvokers: "
                 + validInvokers.size() + "["
                 + validInvokers.stream()
-                        .map(Invoker::getUrl)
-                        .map(URL::getAddress)
-                        .limit(3)
-                        .collect(Collectors.joining(", "))
+                .map(Invoker::getUrl)
+                .map(URL::getAddress)
+                .limit(3)
+                .collect(Collectors.joining(", "))
                 + "]" + ", invokersToReconnect: "
                 + invokersToReconnect.size() + "["
                 + invokersToReconnect.stream()
-                        .map(Invoker::getUrl)
-                        .map(URL::getAddress)
-                        .limit(3)
-                        .collect(Collectors.joining(", "))
+                .map(Invoker::getUrl)
+                .map(URL::getAddress)
+                .limit(3)
+                .collect(Collectors.joining(", "))
                 + "]" + ')';
     }
 }
