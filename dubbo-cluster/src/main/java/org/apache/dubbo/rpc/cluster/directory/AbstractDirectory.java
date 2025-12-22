@@ -214,10 +214,12 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
             if (routerChain != null) {
                 routerChain.getLock().readLock().lock();
             }
+            boolean lockAcquired = false;
             try {
                 if (!invokerRefreshReadLock.tryLock(LockUtils.DEFAULT_TIMEOUT, TimeUnit.MILLISECONDS)) {
-                    throw new RpcException("Failed to acquire invokerRefreshLock for reading invokers");
+                    throw new RpcException("Failed to acquire read lock on invokerRefreshLock within timeout");
                 }
+                lockAcquired = true;
                 // use clone to avoid being modified at doList().
                 if (invokersInitialized) {
                     availableInvokers = validInvokers.clone();
@@ -226,9 +228,12 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new RpcException("Failed to refresh invokers, cause: " + e.getMessage(), e);
+                throw new RpcException(
+                        "Interrupted while acquiring read lock for invoker access, cause: " + e.getMessage(), e);
             } finally {
-                invokerRefreshReadLock.unlock();
+                if (lockAcquired) {
+                    invokerRefreshReadLock.unlock();
+                }
             }
 
             if (routerChain != null) {
