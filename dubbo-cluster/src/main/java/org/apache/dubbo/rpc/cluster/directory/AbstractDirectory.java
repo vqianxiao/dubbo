@@ -217,7 +217,13 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
             boolean lockAcquired = false;
             try {
                 if (!invokerRefreshReadLock.tryLock(LockUtils.DEFAULT_TIMEOUT, TimeUnit.MILLISECONDS)) {
-                    throw new RpcException("Failed to acquire read lock on invokerRefreshLock within timeout");
+                    throw new RpcException(
+                            "Failed to acquire read lock on invokerRefreshLock within timeout. " + "Timeout: "
+                                    + LockUtils.DEFAULT_TIMEOUT + "ms, " + "Lock state: [readLockHeld="
+                                    + invokerRefreshLock.getReadLockCount() + ", writeLockHeld="
+                                    + invokerRefreshLock.isWriteLocked() + ", writeLockHeldByCurrentThread="
+                                    + invokerRefreshLock.isWriteLockedByCurrentThread() + "], Service: "
+                                    + getConsumerUrl().getServiceKey());
                 }
                 lockAcquired = true;
                 // use clone to avoid being modified at doList().
