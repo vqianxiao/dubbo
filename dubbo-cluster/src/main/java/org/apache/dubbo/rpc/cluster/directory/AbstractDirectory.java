@@ -125,7 +125,7 @@ public abstract class AbstractDirectory<T> implements Directory<T> {
 
     private volatile ScheduledFuture<?> connectivityCheckFuture;
 
-    private final ReentrantReadWriteLock invokerRefreshLock = new ReentrantReadWriteLock();
+    private final ReentrantReadWriteLock invokerRefreshLock = new ReentrantReadWriteLock(true);
 
     private final ReentrantReadWriteLock.ReadLock invokerRefreshReadLock = invokerRefreshLock.readLock();
     private final ReentrantReadWriteLock.WriteLock invokerRefreshWriteLock = invokerRefreshLock.writeLock();
